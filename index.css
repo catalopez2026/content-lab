@@ -1,0 +1,57 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --ink:    #0c0c0c;
+  --paper:  #f2ede6;
+  --gold:   #c9a84c;
+  --rust:   #c4472a;
+  --sage:   #3d5a45;
+  --smoke:  #8a8278;
+  --cream:  #faf7f2;
+}
+
+body {
+  background: var(--ink);
+  color: var(--paper);
+  font-family: 'DM Mono', monospace;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Slide preview scrollbar */
+.slides-scroll::-webkit-scrollbar { width: 3px; }
+.slides-scroll::-webkit-scrollbar-track { background: transparent; }
+.slides-scroll::-webkit-scrollbar-thumb { background: rgba(201,168,76,0.3); border-radius: 99px; }
+
+@keyframes shimmer {
+  0%   { background-position: -400px 0; }
+  100% { background-position: 400px 0; }
+}
+
+.shimmer {
+  background: linear-gradient(90deg, rgba(255,255,255,0.03) 25%, rgba(255,255,255,0.08) 50%, rgba(255,255,255,0.03) 75%);
+  background-size: 400px 100%;
+  animation: shimmer 1.8s infinite;
+}
+
+@keyframes spin-slow {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+.spin-slow { animation: spin-slow 8s linear infinite; }
+
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.fade-up { animation: fadeUp 0.6s cubic-bezier(0.22,1,0.36,1) forwards; }
+.fade-up-1 { animation-delay: 0.05s; opacity: 0; }
+.fade-up-2 { animation-delay: 0.12s; opacity: 0; }
+.fade-up-3 { animation-delay: 0.20s; opacity: 0; }
+.fade-up-4 { animation-delay: 0.28s; opacity: 0; }
+.fade-up-5 { animation-delay: 0.36s; opacity: 0; }
+.fade-up-6 { animation-delay: 0.44s; opacity: 0; }
+.fade-up-7 { animation-delay: 0.52s; opacity: 0; }
