@@ -1,28 +1,18 @@
 /**
  * Vercel Serverless Function: /api/process
- * Recibe el video, lo transcribe con Whisper API (OpenAI),
- * y genera el carrusel con Claude (Anthropic).
+ * Transcripción: AssemblyAI (gratis 5h/mes)
+ * Generación: Google Gemini (gratis)
  *
- * Variables de entorno necesarias en Vercel:
- *   OPENAI_API_KEY     → tu key de OpenAI
- *   ANTHROPIC_API_KEY  → tu key de Anthropic
+ * Variables de entorno en Vercel:
+ *   ASSEMBLYAI_API_KEY  → tu key de AssemblyAI
+ *   GEMINI_API_KEY      → tu key de Google Gemini
  */
 
 export const config = {
-  api: {
-    bodyParser: false,   // necesario para recibir multipart/form-data
-    responseLimit: false,
-  },
-  maxDuration: 300,      // 5 min máximo (plan Hobby de Vercel)
+  api: { bodyParser: false, responseLimit: false },
+  maxDuration: 300,
 };
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-/**
- * Parse multipart/form-data manualmente (sin dependencias externas).
- * Vercel no permite instalar paquetes en runtime sin bundling,
- * así que enviamos el video como base64 desde el frontend.
- */
 async function readBody(req) {
   return new Promise((resolve, reject) => {
     let data = '';
@@ -35,26 +25,22 @@ async function readBody(req) {
   });
 }
 
-const CLAUDE_PROMPT = `Eres un experto en copywriting viral para Instagram. Fórmula: CURIOSIDAD + PROMESA + URGENCIA.
+const CAROUSEL_PROMPT = `Eres un experto en copywriting viral para Instagram. Fórmula: CURIOSIDAD + PROMESA + URGENCIA.
 
 Dado el transcript de un video, creá un carrusel de exactamente 7 slides.
 
 ESTRUCTURA:
 - Slide 1 | HOOK: Para el scroll. Máx 8 palabras. Número, pregunta o afirmación contraintuitiva.
-- Slide 2 | PROBLEMA: Agitá el dolor. 2-3 puntos concretos con bullet (•).
+- Slide 2 | PROBLEMA: Agitá el dolor. 2-3 puntos concretos con bullet.
 - Slide 3 | PROMESA: La transformación concreta y medible.
-- Slide 4 | REVELACIÓN 1: Primer insight clave. El "aha moment" #1.
+- Slide 4 | REVELACIÓN 1: Primer insight clave.
 - Slide 5 | REVELACIÓN 2: Más profundo que el anterior.
 - Slide 6 | REVELACIÓN 3: El más valioso, el que nadie más dice.
-- Slide 7 | CTA: Guardar + Compartir + Seguir. Con emoji de flecha →
+- Slide 7 | CTA: Guardar + Compartir + Seguir. Con emoji de flecha
 
-REGLAS:
-• Cada slide: máximo 25 palabras en body
-• Bullets con • para listas
-• Lenguaje directo, audaz, sin relleno
-• Incluir subtítulo corto en cada slide
+REGLAS: máximo 25 palabras en body, bullets con • para listas, lenguaje directo.
 
-Respondé SOLO con JSON válido, sin markdown, sin texto extra:
+Respondé SOLO con JSON válido, sin markdown:
 {
   "topic": "tema en 3-5 palabras",
   "slides": [
@@ -69,112 +55,96 @@ Respondé SOLO con JSON válido, sin markdown, sin texto extra:
   ]
 }`;
 
-// ── Handler principal ─────────────────────────────────────────────────────────
-
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Método no permitido' });
   }
 
-  const OPENAI_KEY    = process.env.OPENAI_API_KEY;
-  const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
+  const ASSEMBLYAI_KEY = process.env.ASSEMBLYAI_API_KEY;
+  const GEMINI_KEY     = process.env.GEMINI_API_KEY;
 
-  if (!OPENAI_KEY || !ANTHROPIC_KEY) {
+  if (!ASSEMBLYAI_KEY || !GEMINI_KEY) {
     return res.status(500).json({
-      error: 'Faltan variables de entorno: OPENAI_API_KEY y/o ANTHROPIC_API_KEY'
+      error: 'Faltan variables de entorno: ASSEMBLYAI_API_KEY y/o GEMINI_API_KEY'
     });
   }
 
   try {
-    // ── 1. Leer body (el frontend manda { fileName, fileType, fileBase64 }) ──
     const body = await readBody(req);
-    const { fileName, fileType, fileBase64 } = body;
+    const { fileBase64 } = body;
 
     if (!fileBase64) {
       return res.status(400).json({ error: 'No se recibió el archivo.' });
     }
 
-    // ── 2. Convertir base64 a Buffer ─────────────────────────────────────────
     const fileBuffer = Buffer.from(fileBase64, 'base64');
 
-    // ── 3. Transcribir con Whisper API (OpenAI) ──────────────────────────────
-    // Armamos un FormData nativo para enviar a OpenAI
-    const { Readable } = await import('stream');
-    const FormData = (await import('formdata-node')).FormData;
-    const { fileFromPath } = await import('formdata-node/file-from-path');
-    const { File } = await import('formdata-node');
-
-    const formData = new FormData();
-    const audioFile = new File([fileBuffer], fileName || 'audio.mp4', { type: fileType || 'video/mp4' });
-    formData.set('file', audioFile);
-    formData.set('model', 'whisper-1');
-    formData.set('response_format', 'text');
-
-    const whisperRes = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+    // ── Subir a AssemblyAI ───────────────────────────────────────────────────
+    const uploadRes = await fetch('https://api.assemblyai.com/v2/upload', {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${OPENAI_KEY}`,
-        ...formData.headers,
+        'authorization': ASSEMBLYAI_KEY,
+        'content-type': 'application/octet-stream',
       },
-      body: formData,
+      body: fileBuffer,
     });
 
-    if (!whisperRes.ok) {
-      const err = await whisperRes.text();
-      throw new Error(`Whisper API error: ${err}`);
-    }
+    if (!uploadRes.ok) throw new Error(`Upload error: ${await uploadRes.text()}`);
+    const { upload_url } = await uploadRes.json();
 
-    const transcript = await whisperRes.text();
+    // ── Iniciar transcripción ────────────────────────────────────────────────
+    const transcriptRes = await fetch('https://api.assemblyai.com/v2/transcript', {
+      method: 'POST',
+      headers: {
+        'authorization': ASSEMBLYAI_KEY,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ audio_url: upload_url, language_detection: true }),
+    });
+
+    if (!transcriptRes.ok) throw new Error(`Transcript error: ${await transcriptRes.text()}`);
+    const { id: transcriptId } = await transcriptRes.json();
+
+    // ── Polling ──────────────────────────────────────────────────────────────
+    let transcript = '';
+    for (let i = 0; i < 60; i++) {
+      await new Promise(r => setTimeout(r, 5000));
+      const poll = await fetch(`https://api.assemblyai.com/v2/transcript/${transcriptId}`, {
+        headers: { 'authorization': ASSEMBLYAI_KEY },
+      });
+      const data = await poll.json();
+      if (data.status === 'completed') { transcript = data.text; break; }
+      if (data.status === 'error') throw new Error(`AssemblyAI: ${data.error}`);
+    }
 
     if (!transcript || transcript.trim().length < 10) {
-      return res.status(422).json({
-        error: 'No se detectó voz en el video. Asegurate de que tenga audio claro.'
-      });
+      return res.status(422).json({ error: 'No se detectó voz en el video.' });
     }
 
-    // ── 4. Generar carrusel con Claude ───────────────────────────────────────
-    const claudeRes = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': ANTHROPIC_KEY,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-5',
-        max_tokens: 2000,
-        system: CLAUDE_PROMPT,
-        messages: [{
-          role: 'user',
-          content: `Transcript del video:\n\n---\n${transcript}\n---\n\nGenerá el carrusel viral.`
-        }]
-      }),
-    });
+    // ── Gemini ───────────────────────────────────────────────────────────────
+    const geminiRes = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: `${CAROUSEL_PROMPT}\n\nTranscript:\n\n${transcript}\n\nGenerá el carrusel.` }] }],
+          generationConfig: { temperature: 0.8, maxOutputTokens: 2000 },
+        }),
+      }
+    );
 
-    if (!claudeRes.ok) {
-      const err = await claudeRes.text();
-      throw new Error(`Claude API error: ${err}`);
-    }
-
-    const claudeData = await claudeRes.json();
-    let rawText = claudeData.content[0].text.trim();
-
-    // Limpiar posibles markdown fences
-    if (rawText.startsWith('```')) {
-      rawText = rawText.replace(/```json\n?|```\n?/g, '').trim();
-    }
+    if (!geminiRes.ok) throw new Error(`Gemini error: ${await geminiRes.text()}`);
+    const geminiData = await geminiRes.json();
+    let rawText = geminiData.candidates[0].content.parts[0].text.trim();
+    if (rawText.startsWith('```')) rawText = rawText.replace(/```json\n?|```\n?/g, '').trim();
 
     const carousel = JSON.parse(rawText);
 
-    // ── 5. Responder ─────────────────────────────────────────────────────────
-    return res.status(200).json({
-      success: true,
-      transcript,
-      carousel,
-    });
+    return res.status(200).json({ success: true, transcript, carousel });
 
   } catch (err) {
-    console.error('Error en /api/process:', err);
-    return res.status(500).json({ error: err.message || 'Error interno del servidor' });
+    console.error('Error:', err);
+    return res.status(500).json({ error: err.message || 'Error interno' });
   }
 }
