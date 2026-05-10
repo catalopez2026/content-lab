@@ -1,9 +1,9 @@
 /**
  * /api/process
- * 1. Recibe el video en chunks desde el frontend
- * 2. Lo sube a Cloudinary para obtener URL pública
- * 3. Pasa la URL a AssemblyAI para transcribir
- * 4. Llama a Gemini para generar el carrusel
+ * 1. Recibe el video en base64
+ * 2. Lo sube a Cloudinary (upload firmado)
+ * 3. Pasa la URL a AssemblyAI
+ * 4. Llama a Gemini para el carrusel
  */
 
 export const config = {
@@ -16,10 +16,8 @@ async function readBody(req) {
     const chunks = [];
     req.on('data', chunk => chunks.push(chunk));
     req.on('end', () => {
-      try {
-        const buf = Buffer.concat(chunks);
-        resolve(JSON.parse(buf.toString()));
-      } catch(e) { reject(e); }
+      try { resolve(JSON.parse(Buffer.concat(chunks).toString())); }
+      catch(e) { reject(e); }
     });
     req.on('error', reject);
   });
@@ -63,68 +61,60 @@ export default async function handler(req, res) {
 
   try {
     const body = await readBody(req);
-    const { fileBase64, fileName, fileType } = body;
+    const { fileBase64, fileType } = body;
     if (!fileBase64) return res.status(400).json({ error: 'No se recibió archivo' });
 
     const fileBuffer = Buffer.from(fileBase64, 'base64');
 
-    // ── 1. Subir a Cloudinary ────────────────────────────────────────────────
-    // Firma para upload autenticado
-    const timestamp = Math.floor(Date.now() / 1000);
+    // ── 1. Subir a Cloudinary con firma ──────────────────────────────────────
     const crypto = await import('crypto');
-    const signStr = `folder=content-lab&timestamp=${timestamp}&upload_preset=ml_default`;
-    
-    // Upload via multipart a Cloudinary
-    const boundary = '----FormBoundary' + Math.random().toString(36).slice(2);
-    
-    // Calcular firma SHA1
-    const signature = crypto.default
-      .createHash('sha1')
-      .update(`folder=content-lab&timestamp=${timestamp}${CLOUD_SECRET}`)
-      .digest('hex');
+    const timestamp = Math.floor(Date.now() / 1000);
+    const folder = 'content-lab';
 
-    // Construir multipart body manualmente
-    const parts = [
-      `--${boundary}\r\nContent-Disposition: form-data; name="file"\r\nContent-Type: ${fileType || 'video/mp4'}\r\n\r\n`,
-      fileBuffer,
-      `\r\n--${boundary}\r\nContent-Disposition: form-data; name="api_key"\r\n\r\n${CLOUD_KEY}`,
-      `\r\n--${boundary}\r\nContent-Disposition: form-data; name="timestamp"\r\n\r\n${timestamp}`,
-      `\r\n--${boundary}\r\nContent-Disposition: form-data; name="signature"\r\n\r\n${signature}`,
-      `\r\n--${boundary}\r\nContent-Disposition: form-data; name="folder"\r\n\r\ncontent-lab`,
-      `\r\n--${boundary}\r\nContent-Disposition: form-data; name="resource_type"\r\n\r\nvideo`,
-      `\r\n--${boundary}--\r\n`,
-    ];
+    // Firma SHA1
+    const toSign = `folder=${folder}&timestamp=${timestamp}${CLOUD_SECRET}`;
+    const signature = crypto.default.createHash('sha1').update(toSign).digest('hex');
 
-    const bodyParts = parts.map(p => typeof p === 'string' ? Buffer.from(p) : p);
-    const multipartBody = Buffer.concat(bodyParts);
+    // Construir multipart manualmente
+    const boundary = '----CLBoundary' + Date.now();
+    const mimeType = fileType || 'video/mp4';
+
+    const addField = (name, value) =>
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`);
+
+    const fileHeader = Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="video.mp4"\r\nContent-Type: ${mimeType}\r\n\r\n`
+    );
+    const fileFooter = Buffer.from(`\r\n`);
+    const closingBoundary = Buffer.from(`--${boundary}--\r\n`);
+
+    const multipartBody = Buffer.concat([
+      fileHeader, fileBuffer, fileFooter,
+      addField('api_key', CLOUD_KEY),
+      addField('timestamp', String(timestamp)),
+      addField('signature', signature),
+      addField('folder', folder),
+      closingBoundary,
+    ]);
 
     const cloudRes = await fetch(
       `https://api.cloudinary.com/v1_1/${CLOUD_NAME}/video/upload`,
       {
         method: 'POST',
-        headers: {
-          'Content-Type': `multipart/form-data; boundary=${boundary}`,
-          'Content-Length': multipartBody.length,
-        },
+        headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
         body: multipartBody,
       }
     );
 
-    if (!cloudRes.ok) {
-      const errText = await cloudRes.text();
-      throw new Error(`Cloudinary error: ${errText}`);
-    }
-
-    const cloudData = await cloudRes.json();
+    const cloudText = await cloudRes.text();
+    if (!cloudRes.ok) throw new Error(`Cloudinary error: ${cloudText}`);
+    const cloudData = JSON.parse(cloudText);
     const videoUrl = cloudData.secure_url;
 
-    // ── 2. Transcribir con AssemblyAI usando URL ─────────────────────────────
+    // ── 2. Transcribir con AssemblyAI ────────────────────────────────────────
     const transcriptRes = await fetch('https://api.assemblyai.com/v2/transcript', {
       method: 'POST',
-      headers: {
-        'authorization': ASSEMBLYAI_KEY,
-        'content-type': 'application/json',
-      },
+      headers: { 'authorization': ASSEMBLYAI_KEY, 'content-type': 'application/json' },
       body: JSON.stringify({ audio_url: videoUrl, language_detection: true }),
     });
 
@@ -143,7 +133,7 @@ export default async function handler(req, res) {
       if (data.status === 'error') throw new Error(`AssemblyAI: ${data.error}`);
     }
 
-    if (!transcript) throw new Error('Tiempo de espera agotado en transcripción.');
+    if (!transcript) throw new Error('Tiempo de espera agotado.');
 
     // ── 4. Gemini ────────────────────────────────────────────────────────────
     const geminiRes = await fetch(
