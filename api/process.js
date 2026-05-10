@@ -1,9 +1,7 @@
 /**
  * /api/process
- * 1. Recibe el video en base64
- * 2. Lo sube a Cloudinary (upload firmado)
- * 3. Pasa la URL a AssemblyAI
- * 4. Llama a Gemini para el carrusel
+ * Recibe { videoUrl } — la URL de Cloudinary
+ * Transcribe con AssemblyAI y genera carrusel con Gemini
  */
 
 export const config = {
@@ -51,67 +49,17 @@ export default async function handler(req, res) {
 
   const ASSEMBLYAI_KEY = process.env.ASSEMBLYAI_API_KEY;
   const GEMINI_KEY     = process.env.GEMINI_API_KEY;
-  const CLOUD_NAME     = process.env.CLOUDINARY_CLOUD_NAME;
-  const CLOUD_KEY      = process.env.CLOUDINARY_API_KEY;
-  const CLOUD_SECRET   = process.env.CLOUDINARY_API_SECRET;
 
-  if (!ASSEMBLYAI_KEY || !GEMINI_KEY || !CLOUD_NAME || !CLOUD_KEY || !CLOUD_SECRET) {
+  if (!ASSEMBLYAI_KEY || !GEMINI_KEY) {
     return res.status(500).json({ error: 'Faltan variables de entorno' });
   }
 
   try {
     const body = await readBody(req);
-    const { fileBase64, fileType } = body;
-    if (!fileBase64) return res.status(400).json({ error: 'No se recibió archivo' });
+    const { videoUrl } = body;
+    if (!videoUrl) return res.status(400).json({ error: 'No se recibió URL del video' });
 
-    const fileBuffer = Buffer.from(fileBase64, 'base64');
-
-    // ── 1. Subir a Cloudinary con firma ──────────────────────────────────────
-    const crypto = await import('crypto');
-    const timestamp = Math.floor(Date.now() / 1000);
-    const folder = 'content-lab';
-
-    // Firma SHA1
-    const toSign = `folder=${folder}&timestamp=${timestamp}${CLOUD_SECRET}`;
-    const signature = crypto.default.createHash('sha1').update(toSign).digest('hex');
-
-    // Construir multipart manualmente
-    const boundary = '----CLBoundary' + Date.now();
-    const mimeType = fileType || 'video/mp4';
-
-    const addField = (name, value) =>
-      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`);
-
-    const fileHeader = Buffer.from(
-      `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="video.mp4"\r\nContent-Type: ${mimeType}\r\n\r\n`
-    );
-    const fileFooter = Buffer.from(`\r\n`);
-    const closingBoundary = Buffer.from(`--${boundary}--\r\n`);
-
-    const multipartBody = Buffer.concat([
-      fileHeader, fileBuffer, fileFooter,
-      addField('api_key', CLOUD_KEY),
-      addField('timestamp', String(timestamp)),
-      addField('signature', signature),
-      addField('folder', folder),
-      closingBoundary,
-    ]);
-
-    const cloudRes = await fetch(
-      `https://api.cloudinary.com/v1_1/${CLOUD_NAME}/video/upload`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
-        body: multipartBody,
-      }
-    );
-
-    const cloudText = await cloudRes.text();
-    if (!cloudRes.ok) throw new Error(`Cloudinary error: ${cloudText}`);
-    const cloudData = JSON.parse(cloudText);
-    const videoUrl = cloudData.secure_url;
-
-    // ── 2. Transcribir con AssemblyAI ────────────────────────────────────────
+    // ── 1. Transcribir con AssemblyAI usando URL ─────────────────────────────
     const transcriptRes = await fetch('https://api.assemblyai.com/v2/transcript', {
       method: 'POST',
       headers: { 'authorization': ASSEMBLYAI_KEY, 'content-type': 'application/json' },
@@ -121,7 +69,7 @@ export default async function handler(req, res) {
     if (!transcriptRes.ok) throw new Error(`AssemblyAI error: ${await transcriptRes.text()}`);
     const { id: transcriptId } = await transcriptRes.json();
 
-    // ── 3. Polling ───────────────────────────────────────────────────────────
+    // ── 2. Polling ───────────────────────────────────────────────────────────
     let transcript = '';
     for (let i = 0; i < 60; i++) {
       await new Promise(r => setTimeout(r, 5000));
@@ -135,7 +83,7 @@ export default async function handler(req, res) {
 
     if (!transcript) throw new Error('Tiempo de espera agotado.');
 
-    // ── 4. Gemini ────────────────────────────────────────────────────────────
+    // ── 3. Gemini ────────────────────────────────────────────────────────────
     const geminiRes = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`,
       {

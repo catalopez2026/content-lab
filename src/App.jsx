@@ -1,10 +1,13 @@
 /**
  * Content Lab · Video → Carrusel
- * Envía el video como base64 al backend /api/process
- * El backend sube a Cloudinary → AssemblyAI → Gemini
+ * Sube el video directo a Cloudinary desde el browser (sin límite de tamaño)
+ * Luego envía la URL a /api/process para transcribir y generar el carrusel
  */
 
 import { useState, useRef, useCallback } from "react";
+
+const CLOUDINARY_CLOUD = "dc3bjgeoz";
+const CLOUDINARY_PRESET = "contentlab_unsigned";
 
 const PALETTE = {
   HOOK:          { accent: "#C9A84C", dim: "rgba(201,168,76,0.12)" },
@@ -24,15 +27,6 @@ function getPal(type = "") {
 
 function fmt(bytes) {
   return bytes > 1024*1024 ? `${(bytes/1024/1024).toFixed(1)} MB` : `${(bytes/1024).toFixed(0)} KB`;
-}
-
-function toBase64(file) {
-  return new Promise((res, rej) => {
-    const r = new FileReader();
-    r.onload = () => res(r.result.split(",")[1]);
-    r.onerror = rej;
-    r.readAsDataURL(file);
-  });
 }
 
 function SlideCard({ slide }) {
@@ -62,7 +56,8 @@ function SlideCard({ slide }) {
               {lines.map((l,i)=>(
                 <li key={i} className="flex items-start gap-2">
                   <span style={{ color:pal.accent, flexShrink:0, marginTop:1 }}>•</span>
-                  <span style={{ fontSize:"clamp(0.65rem,2vw,0.78rem)", color:"#c8c0b4", lineHeight:1.55, fontWeight:300 }}>{l}</span>
+                  <span style={{ fontSize:"clamp(0.65rem,2vw,0.78rem)", color:"#c8c0b4",
+                    lineHeight:1.55, fontWeight:300 }}>{l}</span>
                 </li>
               ))}
             </ul>
@@ -94,7 +89,7 @@ function SlideThumbnail({ slide, active, onClick }) {
 }
 
 function ProgressBar({ phase, progress }) {
-  const steps = ["Subiendo video", "Transcribiendo audio", "Generando carrusel"];
+  const steps = ["Subiendo a Cloudinary", "Transcribiendo audio", "Generando carrusel"];
   const idx = phase==="upload"?0:phase==="transcribe"?1:2;
   return (
     <div className="w-full max-w-md mx-auto space-y-8">
@@ -110,7 +105,9 @@ function ProgressBar({ phase, progress }) {
           </span>
         </div>
       </div>
-      {progress && <p style={{ textAlign:"center", fontSize:12, color:"#C9A84C", letterSpacing:"0.1em" }}>{progress}</p>}
+      {progress && (
+        <p style={{ textAlign:"center", fontSize:12, color:"#C9A84C", letterSpacing:"0.1em" }}>{progress}</p>
+      )}
       <div className="space-y-3">
         {steps.map((s,i)=>{
           const done=i<idx, current=i===idx;
@@ -147,7 +144,6 @@ export default function App() {
     if (!f) return;
     const ok = ["video/mp4","video/quicktime"].includes(f.type)||/\.(mp4|mov)$/i.test(f.name);
     if (!ok) { setError("Solo MP4 o MOV."); return; }
-    if (f.size > 500*1024*1024) { setError("Máximo 500MB."); return; }
     setFile(f); setError(""); setPhase("ready"); setCarousel(null);
   }, []);
 
@@ -158,22 +154,50 @@ export default function App() {
   const process = useCallback(async () => {
     if (!file) return;
     setError("");
-    try {
-      setPhase("upload");
-      setProgress("Preparando video...");
-      const fileBase64 = await toBase64(file);
 
-      setProgress("Subiendo a servidor...");
+    try {
+      // ── 1. Subir directo a Cloudinary desde el browser ───────────────────
+      setPhase("upload");
+      setProgress("Subiendo video a Cloudinary...");
+
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("upload_preset", CLOUDINARY_PRESET);
+      formData.append("resource_type", "video");
+
+      const xhr = new XMLHttpRequest();
+      const cloudUrl = await new Promise((resolve, reject) => {
+        xhr.open("POST", `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD}/video/upload`);
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) {
+            const pct = Math.round((e.loaded / e.total) * 100);
+            setProgress(`Subiendo... ${pct}%`);
+          }
+        };
+        xhr.onload = () => {
+          if (xhr.status === 200) {
+            const data = JSON.parse(xhr.responseText);
+            resolve(data.secure_url);
+          } else {
+            reject(new Error(`Cloudinary error: ${xhr.responseText}`));
+          }
+        };
+        xhr.onerror = () => reject(new Error("Error de red al subir a Cloudinary"));
+        xhr.send(formData);
+      });
+
+      // ── 2. Enviar URL al backend para transcribir y generar ──────────────
       setPhase("transcribe");
+      setProgress("Transcribiendo audio con AssemblyAI...");
 
       const res = await fetch("/api/process", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fileBase64, fileName: file.name, fileType: file.type }),
+        body: JSON.stringify({ videoUrl: cloudUrl }),
       });
 
       setPhase("generate");
-      setProgress("Generando carrusel...");
+      setProgress("Generando carrusel con Gemini...");
 
       const data = await res.json();
       if (!res.ok || !data.success) throw new Error(data.error || "Error desconocido");
@@ -182,6 +206,7 @@ export default function App() {
       setTrans(data.transcript);
       setActiveIdx(0);
       setPhase("done");
+
     } catch(e) {
       setError(e.message||"Error al procesar.");
       setPhase("error");
@@ -253,7 +278,7 @@ export default function App() {
                   <p style={{ fontFamily:"'Instrument Serif', serif", fontSize:18, color:"#f2ede6", fontStyle:"italic" }}>
                     {dragging?"Soltá el video aquí":"Arrastrá tu video aquí"}
                   </p>
-                  <p style={{ fontSize:11, color:"#4a4540", letterSpacing:"0.12em" }}>MP4 · MOV · máx. 500MB</p>
+                  <p style={{ fontSize:11, color:"#4a4540", letterSpacing:"0.12em" }}>MP4 · MOV · cualquier tamaño</p>
                 </div>
               )}
               <input ref={inputRef} type="file" accept="video/mp4,video/quicktime,.mp4,.mov"
@@ -310,7 +335,8 @@ export default function App() {
                     <div className="flex items-center justify-center gap-3 mt-2">
                       <button onClick={()=>setActiveIdx(Math.max(0,activeIdx-1))} disabled={activeIdx===0}
                         className="w-8 h-8 rounded-lg flex items-center justify-center transition-all"
-                        style={{ border:"1px solid rgba(255,255,255,0.08)", color:"#4a4540", opacity:activeIdx===0?0.2:1 }}>‹</button>
+                        style={{ border:"1px solid rgba(255,255,255,0.08)", color:"#4a4540",
+                          opacity:activeIdx===0?0.2:1 }}>‹</button>
                       <div className="flex gap-1.5">
                         {carousel.slides?.map((_,i)=>(
                           <button key={i} onClick={()=>setActiveIdx(i)} className="rounded-full transition-all duration-200"
