@@ -63,7 +63,7 @@ export default async function handler(req, res) {
     const transcriptRes = await fetch('https://api.assemblyai.com/v2/transcript', {
       method: 'POST',
       headers: { 'authorization': ASSEMBLYAI_KEY, 'content-type': 'application/json' },
-      body: JSON.stringify({ audio_url: videoUrl, language_detection: true }),
+      body: JSON.stringify({ audio_url: videoUrl }),
     });
 
     if (!transcriptRes.ok) throw new Error(`AssemblyAI error: ${await transcriptRes.text()}`);
